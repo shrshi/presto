@@ -340,6 +340,7 @@ import static com.facebook.presto.geospatial.type.BingTileType.BING_TILE;
 import static com.facebook.presto.geospatial.type.GeometryType.GEOMETRY;
 import static com.facebook.presto.operator.aggregation.AlternativeArbitraryAggregationFunction.ALTERNATIVE_ANY_VALUE_AGGREGATION;
 import static com.facebook.presto.operator.aggregation.AlternativeArbitraryAggregationFunction.ALTERNATIVE_ARBITRARY_AGGREGATION;
+import static com.facebook.presto.operator.aggregation.AlternativeDecimalSumAggregation.ALTERNATIVE_DECIMAL_SUM_AGGREGATION;
 import static com.facebook.presto.operator.aggregation.AlternativeMaxAggregationFunction.ALTERNATIVE_MAX;
 import static com.facebook.presto.operator.aggregation.AlternativeMinAggregationFunction.ALTERNATIVE_MIN;
 import static com.facebook.presto.operator.aggregation.ArbitraryAggregationFunction.ANY_VALUE_AGGREGATION;
@@ -1020,6 +1021,10 @@ public class BuiltInTypeAndFunctionNamespaceManager
         }
         else {
             builder.scalar(GeoFunctions.StEquals.class);
+        }
+
+        if (functionsConfig.isCudfEnabled()) {
+            builder.override(DECIMAL_SUM_AGGREGATION, ALTERNATIVE_DECIMAL_SUM_AGGREGATION);
         }
 
         // Replace some aggregations for Velox to override intermediate aggregation type.

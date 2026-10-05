@@ -30,6 +30,7 @@ public class FunctionsConfig
 {
     private boolean legacyArrayAgg;
     private boolean useAlternativeFunctionSignatures;
+    private boolean cudfEnabled;
     private boolean legacyMapSubscript;
     private boolean reduceAggForComplexTypesEnabled = true;
     private boolean legacyLogFunction;
@@ -75,6 +76,19 @@ public class FunctionsConfig
     public boolean isLegacyLogFunction()
     {
         return legacyLogFunction;
+    }
+
+    @Config("cudf.enabled")
+    @ConfigDescription("Use cuDF-specific aggregate intermediate types; requires compatible native GPU workers")
+    public FunctionsConfig setCudfEnabled(boolean cudfEnabled)
+    {
+        this.cudfEnabled = cudfEnabled;
+        return this;
+    }
+
+    public boolean isCudfEnabled()
+    {
+        return cudfEnabled;
     }
 
     @Config("use-alternative-function-signatures")

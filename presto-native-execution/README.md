@@ -208,6 +208,31 @@ The make command will look like:
 
 The required dependencies are bundled from the Velox setup scripts.
 
+##### NVIDIA cuDF execution
+
+Configure CMake with `-DPRESTO_ENABLE_CUDF=ON` and set the worker's
+`config.properties` to:
+
+```properties
+cudf.enabled=true
+task.max-drivers-per-task=2
+```
+
+cuDF uses Velox's Driver adapter to replace eligible CPU operators with GPU
+operators. Unsupported operators normally retain their CPU implementation.
+
+The Java coordinator also accepts `cudf.enabled` (default `false`). When enabled,
+its decimal SUM registration advertises `DECIMAL(38, s)` intermediate state for
+Decimal64 inputs rather than `VARBINARY`. Decimal128 SUM and decimal AVG are
+unchanged. This is independent of `use-alternative-function-signatures` and is
+not a per-query setting. The alternative provides planning metadata only, not
+Java execution.
+
+Do not enable the coordinator setting until all execution workers implement
+this cuDF state contract and reject CPU fallback for typed aggregations. The
+coordinator setting does not enforce worker placement or enable worker GPUs.
+See [the implementation plan](docs/typed-decimal-aggregate-state-plan.md).
+
 #### Spatial type and function support
 Spatial type and function support is enabled by default. To disable it, add to `EXTRA_CMAKE_FLAGS` environment variable:
 `export EXTRA_CMAKE_FLAGS="${EXTRA_CMAKE_FLAGS} -PRESTO_ENABLE_SPATIAL=OFF"`
