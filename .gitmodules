@@ -1,4 +1,4 @@
 [submodule "presto-native-execution/velox"]
 	path = presto-native-execution/velox
-	url = https://github.com/rapidsai/velox.git
+	url = https://github.com/shrshi/velox.git
 	branch = WXD-launch
