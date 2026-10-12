@@ -248,7 +248,7 @@ find_package(FBThrift)
 include_directories(SYSTEM ${FBTHRIFT_INCLUDE_DIR})
 
 # Use the exported dependency closure rather than version-specific library files.
-set(PROXYGEN_LIBRARIES proxygen::proxygenhttpserver)
+set(PROXYGEN_LIBRARIES proxygen::proxygenhttpserver proxygen::proxygen)
 
 include_directories(SYSTEM ${OPENSSL_INCLUDE_DIR} ${proxygen_INCLUDE_DIRS})
 include_directories(.)
