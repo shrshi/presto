@@ -89,9 +89,17 @@
 #include "velox/serializers/UnsafeRowSerializer.h"
 
 #ifdef PRESTO_ENABLE_CUDF
+#include "velox/exec/ExchangeTransportRegistry.h"
+#include "velox/exec/OutputTransportRegistry.h"
 #include "velox/experimental/cudf/CudfConfig.h"
+#include "velox/experimental/cudf/exec/CudfOrderBy.h"
+#include "velox/experimental/cudf/exec/OperatorAdapters.h"
 #include "velox/experimental/cudf/exec/ToCudf.h"
 #include "velox/experimental/cudf/expression/PrestoFunctions.h"
+#include "velox/experimental/ucx-exchange/Communicator.h"
+#include "velox/experimental/ucx-exchange/UcxExchange.h"
+#include "velox/experimental/ucx-exchange/UcxOutputQueueManager.h"
+#include "velox/experimental/ucx-exchange/UcxPartitionedOutput.h"
 #endif
 
 #ifdef PRESTO_ENABLE_REMOTE_FUNCTIONS
@@ -192,6 +200,57 @@ bool isSharedLibrary(const fs::path& path) {
   std::transform(pathExt.begin(), pathExt.end(), pathExt.begin(), ::tolower);
   return pathExt == kLinuxSharedLibExt || pathExt == kMacOSSharedLibExt;
 }
+
+#ifdef PRESTO_ENABLE_CUDF
+class UcxMergeExchangeAdapter final
+    : public velox::cudf_velox::OperatorAdapter {
+ public:
+  UcxMergeExchangeAdapter() : OperatorAdapter("UcxMergeExchange") {}
+
+  bool canHandle(const velox::exec::Operator* op) const override {
+    return op->operatorType() == "UcxExchange";
+  }
+
+  bool canRunOnGPU(
+      const velox::exec::Operator* op,
+      const velox::core::PlanNodePtr& planNode,
+      velox::exec::DriverCtx* /*ctx*/) const override {
+    auto* exchange =
+        dynamic_cast<const velox::core::MergeExchangeNode*>(planNode.get());
+    return canHandle(op) && exchange &&
+        exchange->transportKind() == velox::core::TransportKind::kUcx;
+  }
+
+  bool acceptsGpuInput() const override {
+    return false; // The kept exchange is a source.
+  }
+
+  bool producesGpuOutput() const override {
+    return true;
+  }
+
+  bool keepOperator() const override {
+    return true;
+  }
+
+  std::vector<std::unique_ptr<velox::exec::Operator>> createReplacements(
+      const velox::exec::Operator* op,
+      const velox::core::PlanNodePtr& planNode,
+      velox::exec::DriverCtx* ctx,
+      int32_t operatorId) const override {
+    std::vector<std::unique_ptr<velox::exec::Operator>> operators;
+    auto merge =
+        std::dynamic_pointer_cast<const velox::core::MergeExchangeNode>(
+            planNode);
+    if (merge && canRunOnGPU(op, planNode, ctx)) {
+      operators.push_back(
+          std::make_unique<velox::cudf_velox::CudfOrderBy>(
+              operatorId, ctx, merge));
+    }
+    return operators;
+  }
+};
+#endif
 
 void registerVeloxCudf() {
 #ifdef PRESTO_ENABLE_CUDF
@@ -322,7 +381,11 @@ PrestoServer::PrestoServer(const std::string& configDirectoryPath)
       start_(std::chrono::steady_clock::now()),
       memoryInfo_(std::make_unique<protocol::MemoryInfo>()) {}
 
-PrestoServer::~PrestoServer() {}
+PrestoServer::~PrestoServer() {
+#ifdef PRESTO_ENABLE_CUDF
+  shutdownUcxExchange();
+#endif
+}
 
 void PrestoServer::run() {
   initializeConfigs();
@@ -358,6 +421,9 @@ void PrestoServer::run() {
   registerPrestoPlanNodeSerDe();
   registerTraceNodeFactories();
   registerExchangeSources();
+#ifdef PRESTO_ENABLE_CUDF
+  initializeUcxExchange();
+#endif
 
   initializeTaskResources();
   registerListeners();
@@ -647,6 +713,104 @@ void PrestoServer::registerExchangeSources() {
   velox::exec::ExchangeSource::registerFactory(
       operators::BroadcastExchangeSource::createExchangeSource);
 }
+
+#ifdef PRESTO_ENABLE_CUDF
+void PrestoServer::initializeUcxExchange() {
+  namespace exec = velox::exec;
+  const auto& config = velox::cudf_velox::CudfConfig::getInstance();
+  if (!config.enabled || !config.exchange) {
+    return;
+  }
+
+  const auto* systemConfig = SystemConfig::instance();
+  // UcxExchangeSource derives the remote port from the advertised task URI.
+  const int taskPort = httpsPort_.value_or(httpPort_);
+  VELOX_USER_CHECK(
+      taskPort > 0 && taskPort <= 65532,
+      "UCX exchange requires a fixed task HTTP(S) port between 1 and 65532");
+  const int port =
+      systemConfig
+          ->optionalProperty<int>(std::string{"cudf.exchange.server.port"})
+          .value_or(taskPort + 3);
+  VELOX_USER_CHECK_EQ(
+      port,
+      taskPort + 3,
+      "cudf.exchange.server.port must equal the task HTTP(S) port plus 3");
+
+  using namespace velox::ucx_exchange;
+  const std::string transport{velox::core::TransportKind::kUcx};
+  VELOX_CHECK_NULL(exec::OutputTransportRegistry::global().find(transport));
+  VELOX_CHECK_NULL(exec::ExchangeTransportRegistry::global().find(transport));
+
+  velox::ContinueFuture ready;
+  ucxCommunicator_ = Communicator::initAndGet(
+      port, systemConfig->discoveryUri().value_or(""), &ready);
+  VELOX_CHECK_NOT_NULL(ucxCommunicator_);
+  VELOX_USER_CHECK(
+      ready.valid(), "UCX communicator can only be started once per process");
+  ucxThread_ = std::thread([communicator = ucxCommunicator_]() {
+    try {
+      communicator->run();
+    } catch (const std::exception& error) {
+      LOG(FATAL) << "UCX communicator failed: " << error.what();
+    }
+  });
+  std::move(ready).get();
+
+  exec::OutputTransportRegistry::global().insert(
+      transport,
+      exec::OutputTransportEntry::make<UcxOutputQueueManager>(
+          UcxOutputQueueManager::getInstanceRef(),
+          [](int32_t id,
+             exec::DriverCtx* ctx,
+             const std::shared_ptr<const velox::core::PartitionedOutputNode>&
+                 node,
+             bool /*eagerFlush*/,
+             const std::shared_ptr<UcxOutputQueueManager>& manager) {
+            return std::make_unique<UcxPartitionedOutput>(
+                id, ctx, node, manager);
+          }));
+  velox::cudf_velox::OperatorAdapterRegistry::getInstance()
+      .registerAdapterFront(std::make_unique<UcxMergeExchangeAdapter>());
+  exec::ExchangeTransportRegistry::global().insert(
+      transport,
+      exec::ExchangeTransportEntry::make<UcxExchangeClient>(
+          [](const exec::ExchangeClientContext& ctx) {
+            return std::make_shared<UcxExchangeClient>(
+                ctx.taskId, ctx.destination, ctx.numberOfConsumers);
+          },
+          [](int32_t id,
+             exec::DriverCtx* ctx,
+             const std::shared_ptr<const velox::core::ExchangeNode>& node,
+             const std::shared_ptr<UcxExchangeClient>& client) {
+            return std::make_unique<UcxExchange>(id, ctx, node, client);
+          },
+          [](int32_t id,
+             exec::DriverCtx* ctx,
+             const std::shared_ptr<const velox::core::ExchangeNode>& node,
+             const std::shared_ptr<UcxExchangeClient>& client) {
+            VELOX_CHECK_NOT_NULL(
+                std::dynamic_pointer_cast<const velox::core::MergeExchangeNode>(
+                    node));
+            // The driver adapter appends the sort after this kept GPU source.
+            return std::make_unique<UcxExchange>(id, ctx, node, client);
+          }));
+  PRESTO_STARTUP_LOG(INFO) << "UCX exchange listening on port " << port;
+}
+
+void PrestoServer::shutdownUcxExchange() {
+  namespace exec = velox::exec;
+  if (!ucxThread_.joinable()) {
+    return;
+  }
+  const std::string transport{velox::core::TransportKind::kUcx};
+  exec::ExchangeTransportRegistry::global().erase(transport);
+  exec::OutputTransportRegistry::global().erase(transport);
+  ucxCommunicator_->stop();
+  ucxThread_.join();
+  ucxCommunicator_.reset();
+}
+#endif
 
 void PrestoServer::initializeTaskResources() {
   auto systemConfig = SystemConfig::instance();
@@ -947,6 +1111,9 @@ void PrestoServer::shutdownServer() {
   taskResource_.reset();
   PRESTO_SHUTDOWN_LOG(INFO) << "Destroying Task Manager";
   taskManager_.reset();
+#ifdef PRESTO_ENABLE_CUDF
+  shutdownUcxExchange();
+#endif
   PRESTO_SHUTDOWN_LOG(INFO) << "Destroying HTTP Server";
   httpServer_.reset();
 

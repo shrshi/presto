@@ -229,6 +229,15 @@ set(VELOX_GTEST_INCUDE_DIR "velox/third_party/googletest/googletest/include")
 set(VELOX_MONO_LIBRARY ON CACHE BOOL "Build Velox mono library")
 add_subdirectory(velox)
 
+if(PRESTO_ENABLE_CUDF AND NOT TARGET velox_ucx_exchange)
+  if(NOT TARGET ucxx::ucxx)
+    message(FATAL_ERROR "PRESTO_ENABLE_CUDF requires UCX and bundled UCXX for GPU exchange")
+  endif()
+  # CUDA targets discovered inside velox are not visible in this directory.
+  find_package(CUDAToolkit REQUIRED)
+  add_subdirectory(velox/velox/experimental/ucx-exchange velox/velox/experimental/ucx-exchange)
+endif()
+
 if(PRESTO_ENABLE_TESTING)
   set(BUILD_TESTING ON) # some third-party dependency could have disabled this.
   include(CTest) # include after project() but before add_subdirectory()

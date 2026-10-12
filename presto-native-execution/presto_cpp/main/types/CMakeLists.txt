@@ -31,6 +31,10 @@ target_link_libraries(
   velox
 )
 
+if(PRESTO_ENABLE_CUDF)
+  target_link_libraries(presto_types velox_cudf_exec)
+endif()
+
 set_property(TARGET presto_types PROPERTY JOB_POOL_LINK presto_link_job_pool)
 
 add_library(presto_velox_plan_conversion OBJECT VeloxPlanConversion.cpp)

@@ -295,6 +295,11 @@ class VeloxInteractiveQueryPlanConverter : public VeloxQueryPlanConverterBase {
       velox::memory::MemoryPool* pool)
       : VeloxQueryPlanConverterBase(queryCtx, pool) {}
 
+  velox::core::PlanFragment toVeloxQueryPlan(
+      const protocol::PlanFragment& fragment,
+      const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+      const protocol::TaskId& taskId) override;
+
  protected:
   velox::core::PlanNodePtr toVeloxQueryPlan(
       const std::shared_ptr<const protocol::RemoteSourceNode>& node,
@@ -302,6 +307,10 @@ class VeloxInteractiveQueryPlanConverter : public VeloxQueryPlanConverterBase {
       const protocol::TaskId& taskId) override;
 
   velox::connector::CommitStrategy getCommitStrategy() const override;
+
+ private:
+  std::string exchangeTransport(
+      const std::shared_ptr<protocol::TransportType>& transport) const;
 };
 
 class VeloxBatchQueryPlanConverter : public VeloxQueryPlanConverterBase {

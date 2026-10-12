@@ -14,6 +14,7 @@
 #pragma once
 
 #include <atomic>
+#include <thread>
 
 #include <folly/SocketAddress.h>
 #include <folly/Synchronized.h>
@@ -45,6 +46,12 @@ class Connector;
 namespace facebook::velox {
 class Config;
 }
+
+#ifdef PRESTO_ENABLE_CUDF
+namespace facebook::velox::ucx_exchange {
+class Communicator;
+}
+#endif
 
 namespace facebook::presto::http {
 class HttpServer;
@@ -221,6 +228,11 @@ class PrestoServer {
   /// broadcast exchange.
   void registerExchangeSources();
 
+#ifdef PRESTO_ENABLE_CUDF
+  void initializeUcxExchange();
+  void shutdownUcxExchange();
+#endif
+
   /// Creates memory pools, task manager, task resource, and related
   /// components.
   void initializeTaskResources();
@@ -333,6 +345,10 @@ class PrestoServer {
   std::shared_ptr<velox::memory::MemoryPool> nativeWorkerPool_;
   std::unique_ptr<TaskManager> taskManager_;
   std::unique_ptr<TaskResource> taskResource_;
+#ifdef PRESTO_ENABLE_CUDF
+  std::shared_ptr<velox::ucx_exchange::Communicator> ucxCommunicator_;
+  std::thread ucxThread_;
+#endif
   std::atomic<NodeState> nodeState_{NodeState::kActive};
   folly::Synchronized<bool> shuttingDown_{false};
   std::chrono::steady_clock::time_point start_;
