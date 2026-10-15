@@ -11,15 +11,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <folly/ScopeGuard.h>
 #include <gtest/gtest.h>
 #include <fstream>
 
 #include "velox/common/memory/Memory.h"
 #include "velox/core/QueryCtx.h"
-#ifdef PRESTO_ENABLE_CUDF
-#include "velox/experimental/cudf/CudfConfig.h"
-#endif
 
 #include "presto_cpp/main/types/PrestoToVeloxQueryPlan.h"
 #include "velox/functions/prestosql/types/HyperLogLogRegistration.h"
@@ -73,120 +69,81 @@ TEST_F(PrestoToVeloxQueryPlanTest, exchangeTransportSelection) {
   ASSERT_TRUE(input.good());
   const auto outputJson = json::parse(input);
   const std::string taskId = "20201107_130540_00011_wrpkw.1.2.3";
-#ifdef PRESTO_ENABLE_CUDF
-  auto& config = cudf_velox::CudfConfig::getInstance();
-  const auto savedConfig = config;
-  SCOPE_EXIT {
-    config = savedConfig;
-  };
-#endif
+  auto queryCtx = core::QueryCtx::create(
+      nullptr,
+      core::QueryConfig(std::unordered_map<std::string, std::string>{}));
+  VeloxInteractiveQueryPlanConverter converter(queryCtx.get(), pool.get());
 
-  for (bool enabled : {false, true}) {
-    for (bool exchangeEnabled : {false, true}) {
-      for (const auto* queryEnabled : {"false", "true", ""}) {
-#ifdef PRESTO_ENABLE_CUDF
-        config.enabled = enabled;
-        config.exchange = exchangeEnabled;
-#endif
-        std::unordered_map<std::string, std::string> queryConfig;
-        if (*queryEnabled) {
-          queryConfig["cudf.enabled"] = queryEnabled;
-        }
-        auto queryCtx = core::QueryCtx::create(
-            nullptr, core::QueryConfig(std::move(queryConfig)));
-        VeloxInteractiveQueryPlanConverter converter(
-            queryCtx.get(), pool.get());
-        for (const auto* transport : {"HTTP", "ANY", ""}) {
-          for (bool ordered : {false, true}) {
-            SCOPED_TRACE(
-                fmt::format(
-                    "enabled={}, exchange={}, query={}, transport={}, ordered={}",
-                    enabled,
-                    exchangeEnabled,
-                    queryEnabled,
-                    transport,
-                    ordered));
-            auto fragmentJson = outputJson;
-            fragmentJson["root"] = outputJson["root"]["source"];
-            auto& remote = fragmentJson["root"];
-            if (*transport) {
-              fragmentJson["outputTransportType"] = transport;
-              remote["transportType"] = transport;
-            }
-            if (ordered) {
-              remote["orderingScheme"] = json::parse(R"({
-                "orderBy": [{
-                  "variable": {"@type":"variable", "name":"regionkey", "type":"bigint"},
-                  "sortOrder":"ASC_NULLS_FIRST"
-                }]
-              })");
-              remote["ensureSourceOrdering"] = true;
-            }
-            const protocol::PlanFragment fragment = fragmentJson;
-            auto plan = converter.toVeloxQueryPlan(fragment, nullptr, taskId);
-            auto output =
-                std::dynamic_pointer_cast<const core::PartitionedOutputNode>(
-                    plan.planNode);
-            ASSERT_NE(output, nullptr);
-            auto exchange = std::dynamic_pointer_cast<const core::ExchangeNode>(
-                output->sources()[0]);
-            ASSERT_NE(exchange, nullptr);
-            std::string expected{core::TransportKind::kInMemory};
-#ifdef PRESTO_ENABLE_CUDF
-            if (enabled && exchangeEnabled &&
-                std::string(queryEnabled) != "false" &&
-                std::string(transport) == "ANY") {
-              expected = core::TransportKind::kUcx;
-            }
-#endif
-            EXPECT_EQ(output->transportKind(), expected);
-            EXPECT_EQ(exchange->transportKind(), expected);
-            EXPECT_EQ(
-                dynamic_cast<const core::MergeExchangeNode*>(exchange.get()) !=
-                    nullptr,
-                ordered);
-            EXPECT_EQ(exchange->serdeKind(), "Presto");
-
-            // Even an ANY declaration must not route coordinator results to
-            // UCX.
-            fragmentJson["root"] = outputJson["root"];
-            const protocol::PlanFragment coordinatorFragment = fragmentJson;
-            auto coordinatorPlan = converter.toVeloxQueryPlan(
-                coordinatorFragment, nullptr, taskId);
-            auto coordinatorOutput =
-                std::dynamic_pointer_cast<const core::PartitionedOutputNode>(
-                    coordinatorPlan.planNode);
-            ASSERT_NE(coordinatorOutput, nullptr);
-            EXPECT_EQ(
-                coordinatorOutput->transportKind(),
-                core::TransportKind::kInMemory);
-
-            // Batch broadcast inputs keep their existing page transport.
-            fragmentJson["root"] = outputJson["root"]["source"];
-            fragmentJson["root"]["exchangeType"] = "REPLICATE";
-            if (*transport) {
-              fragmentJson["root"]["transportType"] = transport;
-            }
-            const protocol::PlanFragment batchFragment = fragmentJson;
-            VeloxBatchQueryPlanConverter batch(
-                "", nullptr, nullptr, queryCtx.get(), pool.get());
-            auto batchPlan =
-                batch.toVeloxQueryPlan(batchFragment, nullptr, taskId);
-            auto batchOutput =
-                std::dynamic_pointer_cast<const core::PartitionedOutputNode>(
-                    batchPlan.planNode);
-            ASSERT_NE(batchOutput, nullptr);
-            auto batchExchange =
-                std::dynamic_pointer_cast<const core::ExchangeNode>(
-                    batchOutput->sources()[0]);
-            ASSERT_NE(batchExchange, nullptr);
-            EXPECT_EQ(
-                batchOutput->transportKind(), core::TransportKind::kInMemory);
-            EXPECT_EQ(
-                batchExchange->transportKind(), core::TransportKind::kInMemory);
-          }
-        }
+  for (const auto* transport : {"HTTP", "ANY", ""}) {
+    for (bool ordered : {false, true}) {
+      SCOPED_TRACE(fmt::format("transport={}, ordered={}", transport, ordered));
+      auto fragmentJson = outputJson;
+      fragmentJson["root"] = outputJson["root"]["source"];
+      auto& remote = fragmentJson["root"];
+      if (*transport) {
+        fragmentJson["outputTransportType"] = transport;
+        remote["transportType"] = transport;
       }
+      if (ordered) {
+        remote["orderingScheme"] = json::parse(R"({
+          "orderBy": [{
+            "variable": {"@type":"variable", "name":"regionkey", "type":"bigint"},
+            "sortOrder":"ASC_NULLS_FIRST"
+          }]
+        })");
+        remote["ensureSourceOrdering"] = true;
+      }
+      const protocol::PlanFragment fragment = fragmentJson;
+      auto plan = converter.toVeloxQueryPlan(fragment, nullptr, taskId);
+      auto output =
+          std::dynamic_pointer_cast<const core::PartitionedOutputNode>(
+              plan.planNode);
+      ASSERT_NE(output, nullptr);
+      auto exchange = std::dynamic_pointer_cast<const core::ExchangeNode>(
+          output->sources()[0]);
+      ASSERT_NE(exchange, nullptr);
+      std::string expected = std::string(transport) == "ANY"
+          ? std::string{core::TransportKind::kUcx}
+          : std::string{core::TransportKind::kInMemory};
+      EXPECT_EQ(output->transportKind(), expected);
+      EXPECT_EQ(exchange->transportKind(), expected);
+      EXPECT_EQ(
+          dynamic_cast<const core::MergeExchangeNode*>(exchange.get()) !=
+              nullptr,
+          ordered);
+      EXPECT_EQ(exchange->serdeKind(), "Presto");
+
+      // Coordinator results always use the HTTP page transport.
+      fragmentJson["root"] = outputJson["root"];
+      const protocol::PlanFragment coordinatorFragment = fragmentJson;
+      auto coordinatorPlan =
+          converter.toVeloxQueryPlan(coordinatorFragment, nullptr, taskId);
+      auto coordinatorOutput =
+          std::dynamic_pointer_cast<const core::PartitionedOutputNode>(
+              coordinatorPlan.planNode);
+      ASSERT_NE(coordinatorOutput, nullptr);
+      EXPECT_EQ(
+          coordinatorOutput->transportKind(), core::TransportKind::kInMemory);
+
+      // Batch broadcast inputs keep their existing page transport.
+      fragmentJson["root"] = outputJson["root"]["source"];
+      fragmentJson["root"]["exchangeType"] = "REPLICATE";
+      if (*transport) {
+        fragmentJson["root"]["transportType"] = transport;
+      }
+      const protocol::PlanFragment batchFragment = fragmentJson;
+      VeloxBatchQueryPlanConverter batch(
+          "", nullptr, nullptr, queryCtx.get(), pool.get());
+      auto batchPlan = batch.toVeloxQueryPlan(batchFragment, nullptr, taskId);
+      auto batchOutput =
+          std::dynamic_pointer_cast<const core::PartitionedOutputNode>(
+              batchPlan.planNode);
+      ASSERT_NE(batchOutput, nullptr);
+      auto batchExchange = std::dynamic_pointer_cast<const core::ExchangeNode>(
+          batchOutput->sources()[0]);
+      ASSERT_NE(batchExchange, nullptr);
+      EXPECT_EQ(batchOutput->transportKind(), core::TransportKind::kInMemory);
+      EXPECT_EQ(batchExchange->transportKind(), core::TransportKind::kInMemory);
     }
   }
 }

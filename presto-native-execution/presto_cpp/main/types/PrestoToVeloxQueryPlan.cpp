@@ -43,9 +43,6 @@
 #include "presto_cpp/main/properties/session/SessionProperties.h"
 #include "presto_cpp/main/types/TypeParser.h"
 #include "velox/exec/TraceUtil.h"
-#ifdef PRESTO_ENABLE_CUDF
-#include "velox/experimental/cudf/CudfConfig.h"
-#endif
 // RPC plan nodes for single-operator async RPC execution
 #include <folly/json.h>
 #include "presto_cpp/presto_protocol/Base64Util.h"
@@ -3004,15 +3001,9 @@ core::PlanNodePtr VeloxQueryPlanConverterBase::toVeloxQueryPlan(
 
 std::string VeloxInteractiveQueryPlanConverter::exchangeTransport(
     const std::shared_ptr<protocol::TransportType>& transport) const {
-#ifdef PRESTO_ENABLE_CUDF
-  const auto& config = cudf_velox::CudfConfig::getInstance();
-  if (transport && *transport == protocol::TransportType::ANY &&
-      config.enabled && config.exchange &&
-      queryCtx_->queryConfig().get<bool>(
-          cudf_velox::CudfConfig::kCudfEnabled, config.enabled)) {
+  if (transport && *transport == protocol::TransportType::ANY) {
     return std::string{core::TransportKind::kUcx};
   }
-#endif
   return std::string{core::TransportKind::kInMemory};
 }
 

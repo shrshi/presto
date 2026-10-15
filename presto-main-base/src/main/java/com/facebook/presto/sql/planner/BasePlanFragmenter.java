@@ -58,6 +58,7 @@ import com.facebook.presto.sql.planner.plan.TableFunctionNode;
 import com.facebook.presto.sql.planner.plan.TableFunctionProcessorNode;
 import com.facebook.presto.sql.planner.plan.TransportType;
 import com.facebook.presto.sql.planner.sanity.PlanChecker;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -71,6 +72,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static com.facebook.presto.SystemSessionProperties.isForceSingleNodeOutput;
+import static com.facebook.presto.SystemSessionProperties.isNativeCudfExchangeEnabled;
 import static com.facebook.presto.SystemSessionProperties.isNativeExecutionEnabled;
 import static com.facebook.presto.SystemSessionProperties.isSingleNodeExecutionEnabled;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -383,14 +385,7 @@ public abstract class BasePlanFragmenter
 
         setDistributionForExchange(exchange.getType(), partitioningScheme, context);
 
-        // Use ANY (e.g. UCX) for worker-to-worker exchanges, but fall back to
-        // HTTP when a child fragment runs on the coordinator (which only speaks HTTP).
-        TransportType transportType = TransportType.HTTP;
-        boolean anyChildOnCoordinator = exchange.getSources().stream()
-                .anyMatch(PlannerUtils::containsCoordinatorOnlyNode);
-        if (!anyChildOnCoordinator) {
-            transportType = TransportType.ANY;
-        }
+        TransportType transportType = remoteStreamingExchangeTransportType(session, exchange, context.get());
         log.debug("[ANY_EXCHANGE] exchange=%s transport=%s partitioning=%s",
                 exchange.getId(),
                 transportType,
@@ -432,6 +427,18 @@ public abstract class BasePlanFragmenter
                 exchange.getType(),
                 exchange.getPartitioningScheme().getEncoding(),
                 transportType);
+    }
+
+    @VisibleForTesting
+    static TransportType remoteStreamingExchangeTransportType(Session session, ExchangeNode exchange, FragmentProperties consumerProperties)
+    {
+        if (!isNativeCudfExchangeEnabled(session)) {
+            return TransportType.HTTP;
+        }
+
+        boolean producerOnCoordinator = exchange.getSources().stream()
+                .anyMatch(PlannerUtils::containsCoordinatorOnlyNode);
+        return producerOnCoordinator || consumerProperties.hasCoordinatorOnlyDistribution() ? TransportType.HTTP : TransportType.ANY;
     }
 
     protected void setDistributionForExchange(ExchangeNode.Type exchangeType, PartitioningScheme partitioningScheme, RewriteContext<FragmentProperties> context)
@@ -640,6 +647,11 @@ public abstract class BasePlanFragmenter
                     "Cannot set distribution to %s. Already set to %s",
                     distribution,
                     this.partitioningHandle));
+        }
+
+        public boolean hasCoordinatorOnlyDistribution()
+        {
+            return partitioningHandle.isPresent() && partitioningHandle.get().isCoordinatorOnly();
         }
 
         public FragmentProperties setCoordinatorOnlyDistribution(PlanNode node)

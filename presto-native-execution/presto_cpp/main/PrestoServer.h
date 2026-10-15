@@ -47,7 +47,7 @@ namespace facebook::velox {
 class Config;
 }
 
-#ifdef PRESTO_ENABLE_CUDF
+#ifdef PRESTO_ENABLE_UCX_EXCHANGE
 namespace facebook::velox::ucx_exchange {
 class Communicator;
 }
@@ -228,7 +228,7 @@ class PrestoServer {
   /// broadcast exchange.
   void registerExchangeSources();
 
-#ifdef PRESTO_ENABLE_CUDF
+#ifdef PRESTO_ENABLE_UCX_EXCHANGE
   void initializeUcxExchange();
   void shutdownUcxExchange();
 #endif
@@ -345,7 +345,7 @@ class PrestoServer {
   std::shared_ptr<velox::memory::MemoryPool> nativeWorkerPool_;
   std::unique_ptr<TaskManager> taskManager_;
   std::unique_ptr<TaskResource> taskResource_;
-#ifdef PRESTO_ENABLE_CUDF
+#ifdef PRESTO_ENABLE_UCX_EXCHANGE
   std::shared_ptr<velox::ucx_exchange::Communicator> ucxCommunicator_;
   std::thread ucxThread_;
 #endif
